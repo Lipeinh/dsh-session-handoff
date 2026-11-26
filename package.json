@@ -1,0 +1,66 @@
+{
+  "name": "dsh-session-handoff",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/handoff-client.js",
+    "./package.json": "./package.json",
+    "./lib/*": "./lib/*"
+  },
+  "description": "DSH 插件：上下文压力到阈值时，把当前工作交接给一个新会话（文件式交接包 + handoff_now 工具 + HTTP 接口），交接完成后自动终止原会话。",
+  "license": "MIT",
+  "homepage": "https://github.com/Lipeinh/dsh-session-handoff#readme",
+  "bugs": {
+    "url": "https://github.com/Lipeinh/dsh-session-handoff/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lipeinh/dsh-session-handoff.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "handoff",
+    "session",
+    "context",
+    "deepseek-harness"
+  ],
+  "scripts": {
+    "test": "node test/handoff-stop.test.mjs"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  }
+}

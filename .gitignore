@@ -1,0 +1,17 @@
+# 依赖（本插件零运行时依赖，正常不会有 node_modules）
+node_modules/
+
+# 测试沙箱与临时产物
+test/.sandbox/
+*.log
+npm-debug.log*
+
+# 交接包落盘目录（插件运行时产物，可能被放进仓库根）
+.dsh/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

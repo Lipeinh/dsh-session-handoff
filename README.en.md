@@ -1,0 +1,266 @@
+# dsh-session-handoff
+
+English | [中文](README.md)
+
+A DSH plugin that **hands the current work off to a fresh session** once context pressure reaches a threshold.
+
+Long sessions degrade near the end (author's own observation: "thinking but not outputting" starts around
+70% context). DSH's built-in compaction compresses *in place* — it replaces the original history with a
+summary. This plugin takes the other road: **open a new session and carry over a reviewable handoff
+package**, leaving the old session untouched.
+
+- Triggered by **real context pressure**, or by **how many times this session has been compacted** — not a guessed turn count
+- The package is **extracted mechanically from the session itself** (files it touched, tools it used, the
+  last few user and assistant messages, where the last message stopped) and written to disk for review
+- `handoff_now` tool in the desktop app (with a `dryRun` mode) / HTTP endpoints for `dsh web` and the CLI
+- Once the new session exists, **the UI switches to it by itself** (via the harness's `uiWorkspace.openSession`; web and desktop)
+- **The old session is stopped once the handoff completes** — it no longer keeps answering or calling tools, so it cannot race the new session over the same files
+- The old session is **only renamed with ` [已交接]`** — never archived, never deleted
+
+## Requirements
+
+- Developed and verified on DSH desktop **0.2.0-rc.2**
+- Automatic switching relies on the harness's `uiWorkspace.openSession`; **older harnesses without that API
+  neither switch nor error** — the reason is written to `$DSH_HOME/handoff-client-report.json` (see
+  "Known limitations")
+- No separate Node install is needed — it uses the runtime bundled with DSH
+
+## Install
+
+### Desktop app (profile `desktop`)
+
+```cmd
+"<DSH install dir>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add dsh-session-handoff
+```
+
+- `desktop` is the profile reserved for Electron, so **only the desktop app's own bundled command can
+  manage it**. An npm-installed CLI refuses outright:
+  `error: profile "desktop" is managed exclusively by the Electron application`
+- **Open the desktop app once first** (that initializes the profile), then **fully quit it** before
+  running the command — the profile has a write lock and will otherwise wait
+- The desktop `$DSH_HOME` defaults to `%USERPROFILE%\.dsh`, so the profile lives at
+  `%USERPROFILE%\.dsh\profiles\desktop`
+
+### `dsh web` (profile `web`)
+
+```bash
+dsh plugin --profile web add dsh-session-handoff
+```
+
+- The `web` profile **initializes itself on first use** — no manual setup; it lives at
+  `$DSH_HOME/profiles/web`
+- If your web install uses its own home (its launcher sets `DSH_HOME`), use **that install's**
+  `dsh`/`dsh.cmd`, otherwise the package lands in a different home
+
+### Both sides
+
+Then **restart the side you installed into** — the bundle list is read once at startup. Also:
+
+- The npm package is `dsh-session-handoff` (the name `dsh-handoff` was already taken by another plugin)
+- The command writes the package into the profile's `dependencies` *and* `dsh.profile.bundles`, so no
+  manual file editing is needed
+- Without npm: `add github:easerlee/dsh-session-handoff` (same code, just pulled from the repo each time)
+
+Check it is live (web / CLI):
+
+```bash
+curl "http://127.0.0.1:<port>/api/handoff/status"
+# {"ok":true,...,"tool":"registered"}   ← "registered" means the handoff_now tool is registered too
+```
+
+## Uninstall
+
+```cmd
+:: desktop — same as install: fully quit the desktop app first, then use its own bundled command
+"<DSH install dir>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop remove dsh-session-handoff
+```
+
+```bash
+# dsh web
+dsh plugin --profile web remove dsh-session-handoff
+```
+
+You can also just **turn it off** instead: set `enabled` to `false` in the profile's `cordis.patch.yml` —
+the plugin stays installed but stops handing off automatically (the `handoff_now` tool and the HTTP
+endpoints keep working).
+
+Restart that side afterwards, too. Uninstalling does not touch packages you already generated — files
+under `.dsh/handoff/` stay until you delete them.
+
+## Usage
+
+### Desktop: the `handoff_now` tool (recommended)
+
+> You: "hand this off and start a fresh session"
+> Agent: calls `handoff_now` → returns the new session id / title / package path, **and the old session is stopped** (it stops replying)
+
+To review the package first without creating a session:
+
+```
+handoff_now(dryRun: true)     # writes the package only — no new session, no rename, no stop
+```
+
+If you don't want the old session stopped, set `stopOldSession: false` in the config.
+
+### `dsh web` / CLI: HTTP endpoints
+
+```bash
+# trigger manually (omit sessionId to use the most recent active session)
+curl -X POST http://127.0.0.1:<port>/api/handoff/run \
+  -H "content-type: application/json" \
+  -d '{"reason":"manual switch"}'
+
+# status and last result
+curl http://127.0.0.1:<port>/api/handoff/status
+```
+
+On `dsh web`, the `?token=` in the address bar is the credential (visit `/` once so the cookie is set —
+API calls are rejected before that). The desktop app has no address bar; trigger it with the tool above.
+
+### Automatic
+
+A handoff fires once `cooldownMs` has elapsed and either condition holds:
+
+- pressure has reached `thresholdRatio`
+- **this session has been compacted `maxCompactions` times** (default 2)
+
+The second one matters: compaction always pushes pressure back below its own threshold, so a
+pressure-only trigger never gets its chance. How the two get along is below.
+
+## Configuration
+
+In the profile's `cordis.patch.yml`:
+
+```yaml
+- id: dsh-session-handoff
+  config:
+    enabled: true
+    thresholdRatio: 0.85     # shipped default is 0.6; raise it when running with compaction
+    maxCompactions: 2        # hand off after this many compactions of the session (0 = pressure only)
+    cooldownMs: 300000
+    handoffDir: .dsh/handoff
+    recentMessages: 14
+    maxChars: 24000
+    renameOldSuffix: " [已交接]"
+    dryRun: false
+    stopOldSession: true
+    stopDelayMs: 300
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `true` | When off, only the HTTP endpoints and the tool remain, no automatic handoff |
+| `thresholdRatio` | `0.6` | Pressure ratio that triggers a handoff (0.6 = 60%); raise it when running alongside compaction, see below |
+| `maxCompactions` | `2` | Hand off after this many compactions of the session (`0` = pressure only) |
+| `cooldownMs` | `300000` | Minimum gap between two handoffs of the same session |
+| `handoffDir` | `.dsh/handoff` | Where packages are written (relative to the workspace; absolute works too) |
+| `recentMessages` | `14` | How many user messages the user-message section carries (each clipped to 400 chars) |
+| `maxChars` | `24000` | Character cap for the package; the remainder is budgeted to the two message windows, and the older ones are dropped first |
+| `renameOldSuffix` | ` [已交接]` | Suffix appended to the old session's title |
+| `dryRun` | `false` | **true = write the package only, create no session** (useful for a first check) |
+| `stopOldSession` | `true` | After a successful handoff, **stop the old session's running turn** so it stops for good |
+| `stopDelayMs` | `300` | How long to yield before stopping (ms), so this call's tool result lands first; `0` = stop immediately |
+
+⚠️ A patch `config` **replaces the whole block** — when overriding, repeat every key you don't want to change.
+
+## The old session is stopped after a handoff
+
+This is the default (`stopOldSession: true`). Without it a handoff only means "one more session opened":
+the old one keeps replying, keeps calling tools, keeps burning tokens, and both edit the same files.
+
+Stopping uses the harness's own primitives — `agent.cancel({ kind: 'user' }, { keepInbox: false })`,
+the exact semantics behind the UI's Stop button:
+
+- The current turn's `AbortSignal` aborts immediately; the turn closes as
+  `turn/end { kind: 'aborted', reason: { kind: 'user' } }`
+- `keepInbox: false` also **clears the queued next message**. That part is essential: leaving the queue
+  in place lets the loop open *another* turn from the leftovers after the abort settles — effectively
+  not stopping at all
+- The session log and UI state settle through the normal path; the old session is never deleted or
+  archived, and you can go back and read it any time
+
+There is one deliberate yield in the timing. The stop is issued **from inside the old session's own
+`handoff_now` tool call**, and that tool's result (new session id, package path) is only committed to the
+log after `execute` returns. Aborting before that makes the pipeline rewrite the result as "cancelled",
+and the handoff receipt would be invisible. So the plugin yields `stopDelayMs` (300ms by default) before
+pressing stop: **the receipt survives and the old session stops.**
+
+The side effect is intentional: if the old session already fired its next model request within those
+300ms, that request is cut down too.
+
+Set `stopOldSession: false` to turn this off (back to the previous behaviour: hand off only, never stop).
+
+The stop outcome appears in three places: the `handoff_now` return value,
+`lastResult.stopped` from `GET /api/handoff/status`, and the host log:
+
+| `stopped` | Meaning |
+|---|---|
+| `canceled` | Stop was pressed (including while the deferred stop is pending) |
+| `idle` | The old session was already idle with an empty queue — nothing to stop |
+| `not-live` | That session is not in this process's live registry (a cold session with nothing running) |
+| `disabled` | `stopOldSession: false` |
+| `failed` | Reading the session or cancelling threw; `stopped.error` carries the reason (`stopError` on the `handoff_now` tool) |
+
+The assistant-message section has no count setting of its own: it takes whatever budget is left after the
+user-message section and fills it **from the newest backwards**, each message capped at 600 chars. When the
+budget runs out, the *older* messages are the ones dropped; the newest is always there (it is the
+"where it stopped" anchor).
+
+## What the package contains
+
+The file on disk is Markdown with four sections, all **extracted mechanically** from the session — no
+model involved:
+
+| Section | Content |
+|---|---|
+| Files it touched | Paths this session modified (up to 120) |
+| Tools used (count) | Top 12 tools by call count |
+| Recent messages | A user-message section plus an assistant-message section, each filled newest-first within its budget; older ones are dropped first |
+| Where it stopped | The last assistant message (clipped to 2000 chars) — where the successor picks up |
+
+## Relationship to compaction
+
+With both enabled, the thresholds differ:
+
+| | Threshold | Behaviour |
+|---|---|---|
+| `compaction-basic` | `0.6` (default) | Compress in place, the session keeps going |
+| `dsh-session-handoff` | `0.85` (suggested, above compaction) | Open a new session and hand off |
+
+The shipped default is `0.6` as well, the same as compaction's. With both enabled, compaction always
+pushes pressure back below its own threshold first, so **a pressure-only trigger never gets its chance**.
+The handoff therefore also watches the compaction count: once this session has been compacted
+`maxCompactions` times (2 by default) it hands off — compaction handles the daily grind, and enough
+compaction means it is time to move on.
+
+Want handoff to be the main mechanism (pressure only, no compaction count)? Set `compaction-basic` back
+to `disabled: true`, set `maxCompactions` to `0`, and keep `thresholdRatio` at the shipped default `0.6`.
+
+## Known limitations
+
+1. **Automatic switching needs a navigation API from the harness** — it uses `uiWorkspace.openSession`;
+   when that API is absent (older harnesses) it neither switches nor errors, and
+   `$DSH_HOME/handoff-client-report.json` records the reason
+2. **The package is a mechanical extract of the original text, not a model summary** — four sections: the
+   files touched, the tools used (with counts), the last few user/assistant messages, and where it
+   stopped. The decisions are in those assistant messages, verbatim, but *which* of them matters is for
+   the successor to judge
+3. The old session is renamed, not archived (intentional)
+4. The HTTP endpoints only act on sessions **live in that host process**: a freshly started instance with
+   no session opened yet answers `没有可用会话（session 缺失）`
+5. **Stopping the old session only works on a live session**: if it was unloaded or the process restarted,
+   the result is `not-live` — and in that case there is nothing running to stop
+6. **There is another plugin with the same name** — also called `dsh-session-handoff`, distributed as source
+   / tarball, triggered manually with `/handoff`, with a model-generated summary. The npm name is this one
+   (the one that triggers on its own)
+
+## Credits and provenance
+
+This repository continues the work of [`easerlee/dsh-session-handoff`](https://github.com/easerlee/dsh-session-handoff)
+(MIT). The upstream plugin hands the session off but leaves the old session running; the change here is that
+**the old session is stopped once the handoff completes** (see "The old session is stopped after a handoff").
+The original copyright notice is kept in `LICENSE`.
+
+## License
+
+MIT
